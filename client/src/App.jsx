@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import Header from './components/Header';
+import UrlQueryBar from './components/UrlQueryBar';
 import MessageList from './components/MessageList';
 import ChatInput from './components/ChatInput';
 import { useChat } from './hooks/useChat';
@@ -30,6 +31,7 @@ export default function App() {
         darkMode={darkMode}
         onToggleDarkMode={toggleDarkMode}
       />
+      <UrlQueryBar onSend={sendMessage} disabled={isLoading} />
       <MessageList messages={messages} isLoading={isLoading} />
       <ChatInput onSend={sendMessage} disabled={isLoading} />
     </div>

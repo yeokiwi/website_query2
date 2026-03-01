@@ -206,3 +206,85 @@ Please distinguish between what you can confirm as recent vs. what appears to be
 **Empty State**
 - When no messages exist, the main area displays a "Website Change Monitor" welcome message directing the user to enter a URL above and click Request
 - A secondary note mentions that freeform chat is also available below
+
+---
+
+### Batch Website Monitoring (website.md)
+
+**Overview**
+The application supports batch monitoring of multiple websites. A `website.md` file in the project root contains a list of URLs to monitor. The user can trigger a batch run from the UI, which processes each URL through the Automated URL Query Feature and writes each result to an individual markdown file.
+
+**`website.md` Format**
+- Located at the project root (`/website.md`)
+- Contains one URL per line
+- Lines starting with `#` are treated as comments and ignored
+- Empty lines are ignored
+- Example:
+  ```
+  # Websites to monitor
+  https://example.com
+  https://openai.com/blog
+  https://developer.chrome.com
+  ```
+
+**Backend: `POST /api/batch-monitor` Endpoint**
+- Reads and parses `website.md` from the project root
+- For each URL, sends the automated prompt template (the same one used by the single URL Query feature) to the LLM via the existing agentic tool-use loop
+- Each URL is processed with a fresh conversation context (no cross-contamination between sites)
+- Streams progress events to the frontend via SSE:
+  - `batch_start`: `{ total: <number of URLs> }`
+  - `batch_item_start`: `{ index, url }`
+  - `batch_item_text`: `{ index, url, text }` (incremental LLM response text)
+  - `batch_item_tool_start` / `batch_item_tool_end`: tool activity for the current URL
+  - `batch_item_done`: `{ index, url, filename }` (markdown file written)
+  - `batch_item_error`: `{ index, url, error }`
+  - `batch_done`: `{ total, succeeded, failed }`
+
+**Backend: `GET /api/batch-monitor/websites` Endpoint**
+- Returns the parsed list of URLs from `website.md`
+- Response: `{ urls: ["https://example.com", ...] }`
+
+**Backend: `GET /api/reports` Endpoint**
+- Returns a list of generated report files with metadata
+- Response: `{ reports: [{ filename, url, timestamp, size }, ...] }`
+
+**Backend: `GET /api/reports/:filename` Endpoint**
+- Returns the content of a specific report markdown file
+
+**Output Files**
+- Each URL's LLM response is saved as an individual markdown file in a `/reports` directory
+- Filename format: `{domain}-{YYYY-MM-DD}.md` (e.g., `example.com-2026-03-01.md`)
+- If a file with the same name already exists, append a numeric suffix (e.g., `example.com-2026-03-01-2.md`)
+- Each output file includes a YAML front-matter header:
+  ```markdown
+  ---
+  url: https://example.com
+  date: 2026-03-01T12:00:00Z
+  status: success
+  ---
+
+  # Website Change Report: example.com
+
+  [LLM response content here]
+  ```
+
+**UI: Batch Monitor Panel**
+- A "Batch Monitor" button in the header triggers the batch run
+- When clicked, a panel or modal shows:
+  - The list of URLs loaded from `website.md`
+  - A "Run All" button to start processing
+  - Per-URL status: `pending` → `monitoring...` → `done` / `failed`
+  - A progress bar or counter (e.g., "3 / 7 completed")
+  - Once a URL is done, a link to view/download its report
+- While a batch run is in progress, the single URL Query Bar and chat input are disabled
+- The batch run can be cancelled mid-way, preserving reports already written
+
+**UI: Reports List**
+- A "Reports" button in the header opens a panel listing all previously generated report files
+- Each entry shows: domain, date, file size
+- Clicking an entry opens the report content rendered as markdown in the chat area or a modal
+
+**Error Handling**
+- If `website.md` does not exist or is empty, show a user-friendly message with instructions on how to create it
+- If an individual URL fails during batch processing, log the error, write a report file with `status: error` in the front-matter, and continue to the next URL
+- The batch summary at the end reports total, succeeded, and failed counts

@@ -4,9 +4,10 @@
 
 A responsive single-page web application that monitors websites for recent changes. Users can check individual URLs or batch-process a list from a `website.md` file. The application uses an LLM with autonomous web browsing capabilities (`web_search` and `fetch_url` tools) to analyze each site and produce structured change reports saved as individual markdown files.
 
-The two primary workflows are:
+The three primary workflows are:
 1. **Single URL Query** — Enter a URL, click Request, get a streamed analysis in the chat UI
 2. **Batch Monitor** — Load URLs from `website.md`, process all of them sequentially, write each result to a markdown report file in `/reports`
+3. **Website List Editor** — View, add, remove, and reorder URLs in `website.md` directly from the UI without manual file editing
 
 Both workflows use the same prompt template, the same agentic tool-use loop, and the same LLM configuration.
 
@@ -143,6 +144,26 @@ Passed to the LLM on every request:
 - Reads and parses `website.md` from the project root
 - Returns: `{ urls: ["https://example.com", ...] }`
 
+**`PUT /api/batch-monitor/websites`** — Overwrite the full URL list
+- Accepts: `{ urls: ["https://example.com", ...] }`
+- Validates every URL (must be valid, HTTPS, not on the blocklist)
+- Writes the list back to `website.md`, preserving the `# Websites to monitor` header comment
+- Returns: `{ urls: [...] }` (the saved list, confirming the write)
+- Returns `400` with `{ error, invalidUrls }` if any URL fails validation
+
+**`POST /api/batch-monitor/websites`** — Add a single URL
+- Accepts: `{ url: "https://example.com" }`
+- Validates the URL, checks for duplicates
+- Appends to `website.md`
+- Returns: `{ urls: [...] }` (the full updated list)
+- Returns `400` if invalid, `409` if duplicate
+
+**`DELETE /api/batch-monitor/websites`** — Remove a single URL
+- Accepts: `{ url: "https://example.com" }`
+- Removes the matching line from `website.md`
+- Returns: `{ urls: [...] }` (the full updated list)
+- Returns `404` if the URL is not in the list
+
 **`POST /api/batch-monitor`** — Batch run
 - Reads `website.md`, processes each URL through the agentic loop with the shared prompt template
 - Each URL gets a fresh conversation context (no cross-contamination)
@@ -182,7 +203,7 @@ Passed to the LLM on every request:
 
 ### `website.md` Format
 
-Located at the project root. One URL per line. Comments (`#`) and empty lines are ignored.
+Located at the project root. One URL per line. Comments (`#`) and empty lines are ignored. This file can be edited manually or managed through the in-app Website List Editor.
 
 ```
 # Websites to monitor
@@ -190,6 +211,8 @@ https://example.com
 https://openai.com/blog
 https://developer.chrome.com
 ```
+
+When saved via the API, the file always starts with the `# Websites to monitor` header comment followed by one URL per line, with no trailing blank lines.
 
 ---
 
@@ -230,7 +253,7 @@ On error, the file is written with `status: error` and the error message in the 
 
 - App title: "LLM Chat" / "with web browsing"
 - Dark/light mode toggle (persisted to `localStorage`)
-- "Batch Monitor" button — opens the batch panel
+- "Batch Monitor" button — opens the batch panel (which contains the Website List Editor)
 - "Reports" button — opens the reports list
 - "Clear Chat" button — resets conversation history
 
@@ -277,13 +300,50 @@ On error, the file is written with `status: error` and the error message in the 
 
 - Triggered by "Batch Monitor" button in header
 - Shows list of URLs loaded from `website.md` (fetched via `GET /api/batch-monitor/websites`)
+- Includes an "Edit List" button that opens the Website List Editor (see below)
 - "Run All" button starts processing
 - Per-URL status: `pending` → `monitoring...` → `done` / `failed`
 - Progress counter (e.g., "3 / 7 completed")
 - Links to view/download completed reports
 - Cancellable mid-run, preserving reports already written
-- While running, URL Query Bar and Chat Input are disabled
-- If `website.md` is missing or empty, shows instructions for creating it
+- While running, URL Query Bar, Chat Input, and Edit List are disabled
+- If `website.md` is missing or empty, shows instructions and an "Add URLs" button that opens the editor
+
+#### Website List Editor (`WebsiteListEditor`)
+
+An inline editor panel for managing the URLs in `website.md` without leaving the app.
+
+**Access:**
+- "Edit List" button inside the Batch Monitor Panel
+- Also reachable from the empty-state message when `website.md` is missing or empty
+
+**Layout:**
+- Editable list of current URLs, each row showing:
+  - The URL as an editable text input
+  - A drag handle for reordering (or up/down arrow buttons on mobile)
+  - A delete button (trash icon) to remove the row
+- "Add URL" button at the bottom appends a new empty row
+- A "Save" button persists changes via `PUT /api/batch-monitor/websites`
+- A "Cancel" button discards unsaved edits and closes the editor
+
+**Behavior:**
+- On open: fetches the current list from `GET /api/batch-monitor/websites` and populates the rows
+- Adding a URL: appends a new empty input row; user types or pastes the URL
+- Removing a URL: removes the row immediately from the local list (not persisted until Save)
+- Reordering: drag-and-drop or arrow buttons to move a URL up/down in the list
+- On Save:
+  - Auto-prepends `https://` to any URL missing a protocol
+  - Strips empty rows
+  - Sends the full list to `PUT /api/batch-monitor/websites`
+  - If the backend returns validation errors, highlights the invalid rows with an error message (e.g., "Invalid URL", "Private address blocked")
+  - On success, closes the editor and refreshes the Batch Monitor Panel list
+- On Cancel: discards all local edits, closes the editor
+- Disabled while a batch run is in progress
+
+**Validation (client-side, before submit):**
+- Each URL must be non-empty after trimming
+- Basic URL format check (must start with a valid domain or `https://`)
+- Duplicate detection — highlights duplicate rows with a warning
 
 #### Reports Panel
 
@@ -344,6 +404,7 @@ When no messages exist, the main area shows:
 │   │   │   ├── TypingIndicator.jsx
 │   │   │   ├── ChatInput.jsx
 │   │   │   ├── BatchMonitorPanel.jsx
+│   │   │   ├── WebsiteListEditor.jsx
 │   │   │   └── ReportsPanel.jsx
 │   │   ├── hooks/
 │   │   │   └── useChat.js

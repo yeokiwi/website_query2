@@ -1,70 +1,69 @@
-## Coding Prompt: LLM Chat Interface with Browsing Capabilities
+## Website Change Monitor
 
 ### Project Overview
-Build a clean, responsive single-page web application that allows users to send chat messages to an LLM API, display the streamed or returned responses in a conversational UI, and enable the LLM to autonomously browse the web using `web_search` and `fetch_url` tools to answer queries with up-to-date information.
+
+A responsive single-page web application that monitors websites for recent changes. Users can check individual URLs or batch-process a list from a `website.md` file. The application uses an LLM with autonomous web browsing capabilities (`web_search` and `fetch_url` tools) to analyze each site and produce structured change reports saved as individual markdown files.
+
+The two primary workflows are:
+1. **Single URL Query** — Enter a URL, click Request, get a streamed analysis in the chat UI
+2. **Batch Monitor** — Load URLs from `website.md`, process all of them sequentially, write each result to a markdown report file in `/reports`
+
+Both workflows use the same prompt template, the same agentic tool-use loop, and the same LLM configuration.
 
 ---
 
 ### Tech Stack
+
 - **Frontend:** React (with Vite) + Tailwind CSS
 - **Backend:** Node.js + Express
-- **LLM Integration:** Anthropic Claude API (tool use / function calling support required)
-- **Web Search:** SerpAPI, Brave Search API, or DuckDuckGo scraper
-- **URL Fetching:** Axios + Cheerio (for HTML parsing) or Playwright (for JS-rendered pages)
-- **Communication:** REST API with streaming via Server-Sent Events (SSE)
+- **LLM:** Anthropic Claude API (tool use / function calling)
+- **Web Search:** Brave Search API or SerpAPI
+- **URL Fetching:** Axios + Cheerio (HTML parsing) + Turndown (markdown conversion)
+- **Streaming:** Server-Sent Events (SSE)
 
 ---
 
-### Functional Requirements
+### Core Concepts
 
-**Chat Interface**
-- Display a scrollable conversation thread showing alternating user and assistant messages
-- Each message shows a role label ("You" / "Assistant"), timestamp, and message content
-- Auto-scroll to the latest message on new entries
-- Show a typing indicator while awaiting a response
+#### Prompt Template (shared by single and batch modes)
 
-**Tool Activity Feed**
-- When the LLM invokes a tool, display a collapsible "activity card" inline in the chat thread showing:
-  - Tool name (`web_search` or `fetch_url`)
-  - The query or URL used
-  - A truncated preview of the returned result
-  - Status indicator: `searching...` → `done` or `failed`
-- This gives the user visibility into what the LLM is doing behind the scenes
+This is the message sent to the LLM for each URL, with `[URL]` replaced by the target:
 
-**Input Area**
-- Fixed-to-bottom textarea, submits on Enter (Shift+Enter for newline)
-- Disable input while a request or tool call is in progress
-- Clear input after submission
+```
+I need you to examine [URL] and focus specifically on:
+- What's new or changed in the last 30 days?
+- Any announcements, blog posts, or news from the past month
+- Updates to products, services, or features
+- Changes to pricing, terms of service, or policies
+Please distinguish between what you can confirm as recent vs. what appears to be recent based on dates or context.
+```
 
-**Session Management**
-- Maintain full conversation history including tool call/result turns in state
-- Pass the complete history on each API call to preserve context across multi-turn browsing
-- "Clear Chat" button resets the thread and history
+#### Agentic Tool-Use Loop
 
-**Streaming Support**
-- Stream assistant text token-by-token via SSE
-- Pause the stream gracefully when a tool call is detected, execute the tool server-side, then resume the stream with the tool result injected
+The backend implements a multi-step loop for every LLM request:
+
+1. Send messages + tool definitions to the LLM
+2. If the LLM returns a `tool_use` block, execute the tool server-side
+3. Append the `tool_result` to the message history
+4. Re-send the updated history back to the LLM
+5. Repeat until the LLM returns a final `end_turn` text response
+
+This loop is the same for single URL queries and for each URL in a batch run. Each invocation gets a fresh conversation context.
+
+#### System Prompt (configurable in `.env`)
+
+```
+You are a helpful assistant with the ability to browse the web.
+When a user asks about current events, recent data, or specific URLs,
+use the web_search or fetch_url tools to retrieve up-to-date information
+before answering. Always cite your sources by including the URL in your response.
+```
 
 ---
 
-### Backend Requirements
+### Tool Definitions
 
-**`POST /api/chat` Endpoint**
-- Accepts:
-  ```json
-  {
-    "messages": [ { "role": "user", "content": "..." }, ... ]
-  }
-  ```
-- Implements an **agentic tool-use loop:**
-  1. Send messages + tool definitions to the LLM
-  2. If the LLM returns a `tool_use` block, execute the appropriate tool
-  3. Append the `tool_result` to the message history
-  4. Re-send the updated history back to the LLM
-  5. Repeat until the LLM returns a final `end_turn` text response
-- Stream intermediate status updates and final text to the frontend via SSE
-
-**Tool Definitions (passed to LLM on every request)**
+Passed to the LLM on every request:
 
 ```json
 [
@@ -108,183 +107,266 @@ Build a clean, responsive single-page web application that allows users to send 
 ]
 ```
 
-**Tool Execution Handlers**
+#### Tool Execution Handlers
 
 `web_search(query, num_results)`:
-- Call SerpAPI / Brave Search API with the query
+- Call Brave Search API / SerpAPI with the query
 - Return an array of `{ title, url, snippet }` objects
 - Cap content at a configurable token limit to avoid oversized context
 
 `fetch_url(url, extract_mode)`:
-- Use Axios to fetch the raw HTML
-- Use Cheerio to strip navigation, ads, and boilerplate — extract main article content only
+- Fetch raw HTML with Axios
+- Strip navigation, ads, and boilerplate with Cheerio — extract main content only
 - Convert to plain text or Turndown-rendered Markdown depending on `extract_mode`
-- Truncate to a configurable max character limit (e.g. 8,000 chars) before returning to the LLM
+- Truncate to a configurable max character limit (default: 8,000 chars)
 
-**Security & Safety**
-- Maintain a URL blocklist to prevent the LLM from fetching internal/private addresses (`localhost`, `192.168.x.x`, `169.254.x.x`, etc.)
-- Rate limit tool calls per request — cap at a configurable max (e.g. 10 tool calls per conversation turn) to prevent infinite loops
-- Validate all URLs before fetching (must be `https://`)
-- Store all API keys in `.env`, never exposed to the frontend
+---
 
-**Error Handling**
-- If a tool call fails (search API down, URL unreachable, timeout), return a structured error result to the LLM so it can acknowledge the failure and try an alternative approach
-- Surface meaningful HTTP errors to the frontend with user-friendly messages
+### Backend
+
+#### Service Layer
+
+| File | Responsibility |
+|---|---|
+| `server/services/llmService.js` | Anthropic SDK client, model config, tool definitions, `createMessage()` |
+| `server/services/webSearchService.js` | `webSearch(query, numResults)` — Brave or SerpAPI |
+| `server/services/fetchUrlService.js` | `fetchUrl(url, extractMode)` — Axios + Cheerio + Turndown, URL blocklist |
+
+#### API Endpoints
+
+**`POST /api/chat`** — Single query (interactive chat + single URL query)
+- Accepts: `{ messages: [{ role, content }, ...] }`
+- Runs the agentic tool-use loop
+- Streams to frontend via SSE events: `text`, `tool_start`, `tool_end`, `done`, `error`
+
+**`GET /api/batch-monitor/websites`** — List monitored URLs
+- Reads and parses `website.md` from the project root
+- Returns: `{ urls: ["https://example.com", ...] }`
+
+**`POST /api/batch-monitor`** — Batch run
+- Reads `website.md`, processes each URL through the agentic loop with the shared prompt template
+- Each URL gets a fresh conversation context (no cross-contamination)
+- Writes each result to a markdown report file in `/reports`
+- Streams progress via SSE events:
+  - `batch_start`: `{ total }`
+  - `batch_item_start`: `{ index, url }`
+  - `batch_item_text`: `{ index, url, text }`
+  - `batch_item_tool_start` / `batch_item_tool_end`: tool activity for current URL
+  - `batch_item_done`: `{ index, url, filename }`
+  - `batch_item_error`: `{ index, url, error }`
+  - `batch_done`: `{ total, succeeded, failed }`
+
+**`GET /api/reports`** — List generated reports
+- Returns: `{ reports: [{ filename, url, timestamp, size }, ...] }`
+
+**`GET /api/reports/:filename`** — Read a specific report
+- Returns the markdown content of the report file
+
+**`GET /api/health`** — Health check
+
+#### Security & Safety
+
+- URL blocklist: block `localhost`, `127.*`, `10.*`, `172.16-31.*`, `192.168.*`, `169.254.*`, `[::1]`, `fc*`, `fd*`, `fe80*`
+- HTTPS only — reject non-`https://` URLs
+- Rate limit tool calls per turn (configurable, default: 10) to prevent infinite loops
+- All API keys in `.env`, never exposed to the frontend
+- Request timeouts on LLM calls (30s) and URL fetches (15s)
+
+#### Error Handling
+
+- Tool failures return structured error results to the LLM so it can acknowledge and try alternatives
+- HTTP errors surface to the frontend with user-friendly messages
+- Batch mode: individual URL failures log the error, write a report with `status: error`, and continue to the next URL
+
+---
+
+### `website.md` Format
+
+Located at the project root. One URL per line. Comments (`#`) and empty lines are ignored.
+
+```
+# Websites to monitor
+https://example.com
+https://openai.com/blog
+https://developer.chrome.com
+```
+
+---
+
+### Report Output
+
+Each URL's LLM response is saved as a markdown file in `/reports`.
+
+**Filename format:** `{domain}-{YYYY-MM-DD}.md` (e.g., `example.com-2026-03-01.md`)
+If a file with the same name exists, append a numeric suffix: `example.com-2026-03-01-2.md`
+
+**File structure:**
+```markdown
+---
+url: https://example.com
+date: 2026-03-01T12:00:00Z
+status: success
+---
+
+# Website Change Report: example.com
+
+[LLM response content here]
+```
+
+On error, the file is written with `status: error` and the error message in the body.
+
+---
+
+### Frontend
+
+#### Layout (top to bottom)
+
+1. **Header** — App title, dark/light mode toggle, Batch Monitor button, Reports button, Clear Chat button
+2. **URL Query Bar** — URL input + Request button (single-site monitoring)
+3. **Message List** — Scrollable chat thread (user messages, assistant responses, inline tool activity cards)
+4. **Chat Input** — Fixed-to-bottom freeform textarea
+
+#### Header
+
+- App title: "LLM Chat" / "with web browsing"
+- Dark/light mode toggle (persisted to `localStorage`)
+- "Batch Monitor" button — opens the batch panel
+- "Reports" button — opens the reports list
+- "Clear Chat" button — resets conversation history
+
+#### URL Query Bar (`UrlQueryBar`)
+
+- Single-line URL input with link icon, placeholder `https://example.com`
+- **Request** button with search icon
+- Auto-prepends `https://` if user omits the protocol
+- On submit: constructs the shared prompt template with the URL inserted, sends it as a chat message
+- The prompt appears in the chat thread as a normal user message
+- Disabled while any request is in progress
+
+#### Chat Interface
+
+**Message bubbles:**
+- User messages: blue bubble, right-aligned
+- Assistant messages: white/dark bubble, left-aligned, with markdown rendering (react-markdown + remark-gfm + rehype-highlight)
+- Each shows role label ("You" / "Assistant") and timestamp
+
+**Tool activity cards** (inline in assistant messages):
+- Collapsible card showing tool name, query/URL, status (`searching...` → `done` / `failed`)
+- Expandable to show truncated result preview
+- Clickable URLs open in new tab
+
+**Typing indicator:** Animated dots shown while awaiting LLM response
+
+**Auto-scroll** to latest message on new entries
+
+#### Chat Input (`ChatInput`)
+
+- Fixed to bottom, textarea that auto-resizes
+- Enter to send, Shift+Enter for newline
+- Disabled while a request or batch run is in progress
+- Clears after submission
+
+#### Session Management
+
+- Full conversation history maintained in React state
+- Complete history passed on each API call for multi-turn context
+- Persisted to `localStorage`, restored on page load
+- "Clear Chat" resets thread and storage
+
+#### Batch Monitor Panel
+
+- Triggered by "Batch Monitor" button in header
+- Shows list of URLs loaded from `website.md` (fetched via `GET /api/batch-monitor/websites`)
+- "Run All" button starts processing
+- Per-URL status: `pending` → `monitoring...` → `done` / `failed`
+- Progress counter (e.g., "3 / 7 completed")
+- Links to view/download completed reports
+- Cancellable mid-run, preserving reports already written
+- While running, URL Query Bar and Chat Input are disabled
+- If `website.md` is missing or empty, shows instructions for creating it
+
+#### Reports Panel
+
+- Triggered by "Reports" button in header
+- Lists all generated report files (fetched via `GET /api/reports`)
+- Each entry shows: domain, date, file size
+- Clicking an entry renders the report as markdown in a modal or the chat area
+
+#### Empty State
+
+When no messages exist, the main area shows:
+- Globe icon
+- "Website Change Monitor" heading
+- Instruction to enter a URL and click Request
+- Note that freeform chat is also available
 
 ---
 
 ### Non-Functional Requirements
+
 - Mobile-responsive layout (320px and wider)
-- All configurable values in `.env`: API keys, model name, system prompt, max tokens, temperature, tool call limit, fetch character limit
-- Clean service layer separation: `llmService.js`, `webSearchService.js`, `fetchUrlService.js`
-- Request timeout handling for both LLM calls and URL fetches
+- All configurable values in `.env`: API keys, model name, system prompt, max tokens, temperature, tool call limit, fetch character limit, reports directory
+- Clean service layer separation (see Service Layer table above)
+- Request timeout handling for LLM calls and URL fetches
 
 ---
 
-### System Prompt (configurable in `.env`)
-```
-You are a helpful assistant with the ability to browse the web. 
-When a user asks about current events, recent data, or specific URLs, 
-use the web_search or fetch_url tools to retrieve up-to-date information 
-before answering. Always cite your sources by including the URL in your response.
-```
+### Configuration (`.env`)
 
----
-
-### Stretch Goals
-- Markdown rendering with syntax highlighting for assistant responses
-- Display a source citation list at the bottom of each browsed response (extracted URLs)
-- Allow users to click a fetched URL in the activity card to open it in a new tab
-- Persist conversation history to `localStorage`
-- Dark/light mode toggle
-- Admin panel to configure system prompt and tool limits at runtime
+| Variable | Description | Default |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Anthropic API key | (required) |
+| `MODEL_NAME` | Claude model to use | `claude-sonnet-4-20250514` |
+| `MAX_TOKENS` | Max tokens per LLM response | `4096` |
+| `TEMPERATURE` | LLM temperature | `0.7` |
+| `SYSTEM_PROMPT` | System prompt | (see above) |
+| `SEARCH_PROVIDER` | `brave` or `serpapi` | `brave` |
+| `BRAVE_SEARCH_API_KEY` | Brave Search API key | - |
+| `SERPAPI_API_KEY` | SerpAPI key | - |
+| `MAX_TOOL_CALLS_PER_TURN` | Max tool calls per conversation turn | `10` |
+| `FETCH_MAX_CHARS` | Max chars when fetching a URL | `8000` |
+| `REPORTS_DIR` | Directory for report output | `./reports` |
+| `PORT` | Backend server port | `3001` |
 
 ---
 
 ### Deliverables
-1. Full source code with folder structure: `/client`, `/server`, `/server/services`
-2. `.env.example` with all required variables documented
-3. `README.md` covering setup, running locally, swapping LLM providers, and configuring search API keys
-
----
-
-The key addition over a basic chat interface is the **agentic tool-use loop** on the backend — the server must handle multi-step LLM ↔ tool ↔ LLM cycles transparently, streaming progress back to the user so they can see the browsing activity as it happens.
-
----
-
-### Automated URL Query Feature (Website Change Monitor)
-
-**Overview**
-In addition to the freeform chat input, the application includes a dedicated **URL Query Bar** that lets users quickly check any website for recent changes. The user enters a URL and clicks a **Request** button; the application automatically constructs and sends a pre-formatted prompt to the LLM.
-
-**UI Component: `UrlQueryBar`**
-- Placed prominently below the header, above the chat message area
-- Contains a single-line URL input field with a link icon and placeholder text (`https://example.com`)
-- A **Request** button with a search icon sits to the right of the input
-- If the user omits the protocol, the component auto-prepends `https://`
-- Both the input and button are disabled while a request is in progress
-- Submitting clears the URL input
-
-**Automated Prompt Template**
-When the user clicks Request, the following message is automatically sent to the LLM (with `[URL]` replaced by the user's input):
 
 ```
-I need you to examine [URL] and focus specifically on:
-- What's new or changed in the last 30 days?
-- Any announcements, blog posts, or news from the past month
-- Updates to products, services, or features
-- Changes to pricing, terms of service, or policies
-Please distinguish between what you can confirm as recent vs. what appears to be recent based on dates or context.
+├── client/                       # React frontend
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── Header.jsx
+│   │   │   ├── UrlQueryBar.jsx
+│   │   │   ├── MessageList.jsx
+│   │   │   ├── MessageBubble.jsx
+│   │   │   ├── ToolActivityCard.jsx
+│   │   │   ├── TypingIndicator.jsx
+│   │   │   ├── ChatInput.jsx
+│   │   │   ├── BatchMonitorPanel.jsx
+│   │   │   └── ReportsPanel.jsx
+│   │   ├── hooks/
+│   │   │   └── useChat.js
+│   │   ├── utils/
+│   │   │   ├── storage.js
+│   │   │   └── formatTime.js
+│   │   ├── App.jsx
+│   │   ├── main.jsx
+│   │   └── index.css
+│   ├── index.html
+│   ├── vite.config.js
+│   ├── tailwind.config.js
+│   └── package.json
+├── server/
+│   ├── services/
+│   │   ├── llmService.js
+│   │   ├── webSearchService.js
+│   │   └── fetchUrlService.js
+│   ├── index.js
+│   └── package.json
+├── reports/                      # Generated report files
+├── website.md                    # URLs to monitor
+├── .env.example
+├── .gitignore
+└── README.md
 ```
-
-**Behavior**
-- The automated prompt appears in the chat thread as a regular user message so the user can see exactly what was sent
-- The LLM processes the request using its existing `web_search` and `fetch_url` tools to browse and analyze the target website
-- Tool activity cards appear inline as the LLM fetches and analyzes the site
-- The freeform chat input at the bottom of the page remains fully functional for follow-up questions or unrelated queries
-
-**Empty State**
-- When no messages exist, the main area displays a "Website Change Monitor" welcome message directing the user to enter a URL above and click Request
-- A secondary note mentions that freeform chat is also available below
-
----
-
-### Batch Website Monitoring (website.md)
-
-**Overview**
-The application supports batch monitoring of multiple websites. A `website.md` file in the project root contains a list of URLs to monitor. The user can trigger a batch run from the UI, which processes each URL through the Automated URL Query Feature and writes each result to an individual markdown file.
-
-**`website.md` Format**
-- Located at the project root (`/website.md`)
-- Contains one URL per line
-- Lines starting with `#` are treated as comments and ignored
-- Empty lines are ignored
-- Example:
-  ```
-  # Websites to monitor
-  https://example.com
-  https://openai.com/blog
-  https://developer.chrome.com
-  ```
-
-**Backend: `POST /api/batch-monitor` Endpoint**
-- Reads and parses `website.md` from the project root
-- For each URL, sends the automated prompt template (the same one used by the single URL Query feature) to the LLM via the existing agentic tool-use loop
-- Each URL is processed with a fresh conversation context (no cross-contamination between sites)
-- Streams progress events to the frontend via SSE:
-  - `batch_start`: `{ total: <number of URLs> }`
-  - `batch_item_start`: `{ index, url }`
-  - `batch_item_text`: `{ index, url, text }` (incremental LLM response text)
-  - `batch_item_tool_start` / `batch_item_tool_end`: tool activity for the current URL
-  - `batch_item_done`: `{ index, url, filename }` (markdown file written)
-  - `batch_item_error`: `{ index, url, error }`
-  - `batch_done`: `{ total, succeeded, failed }`
-
-**Backend: `GET /api/batch-monitor/websites` Endpoint**
-- Returns the parsed list of URLs from `website.md`
-- Response: `{ urls: ["https://example.com", ...] }`
-
-**Backend: `GET /api/reports` Endpoint**
-- Returns a list of generated report files with metadata
-- Response: `{ reports: [{ filename, url, timestamp, size }, ...] }`
-
-**Backend: `GET /api/reports/:filename` Endpoint**
-- Returns the content of a specific report markdown file
-
-**Output Files**
-- Each URL's LLM response is saved as an individual markdown file in a `/reports` directory
-- Filename format: `{domain}-{YYYY-MM-DD}.md` (e.g., `example.com-2026-03-01.md`)
-- If a file with the same name already exists, append a numeric suffix (e.g., `example.com-2026-03-01-2.md`)
-- Each output file includes a YAML front-matter header:
-  ```markdown
-  ---
-  url: https://example.com
-  date: 2026-03-01T12:00:00Z
-  status: success
-  ---
-
-  # Website Change Report: example.com
-
-  [LLM response content here]
-  ```
-
-**UI: Batch Monitor Panel**
-- A "Batch Monitor" button in the header triggers the batch run
-- When clicked, a panel or modal shows:
-  - The list of URLs loaded from `website.md`
-  - A "Run All" button to start processing
-  - Per-URL status: `pending` → `monitoring...` → `done` / `failed`
-  - A progress bar or counter (e.g., "3 / 7 completed")
-  - Once a URL is done, a link to view/download its report
-- While a batch run is in progress, the single URL Query Bar and chat input are disabled
-- The batch run can be cancelled mid-way, preserving reports already written
-
-**UI: Reports List**
-- A "Reports" button in the header opens a panel listing all previously generated report files
-- Each entry shows: domain, date, file size
-- Clicking an entry opens the report content rendered as markdown in the chat area or a modal
-
-**Error Handling**
-- If `website.md` does not exist or is empty, show a user-friendly message with instructions on how to create it
-- If an individual URL fails during batch processing, log the error, write a report file with `status: error` in the front-matter, and continue to the next URL
-- The batch summary at the end reports total, succeeded, and failed counts

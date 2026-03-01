@@ -169,3 +169,40 @@ before answering. Always cite your sources by including the URL in your response
 ---
 
 The key addition over a basic chat interface is the **agentic tool-use loop** on the backend — the server must handle multi-step LLM ↔ tool ↔ LLM cycles transparently, streaming progress back to the user so they can see the browsing activity as it happens.
+
+---
+
+### Automated URL Query Feature (Website Change Monitor)
+
+**Overview**
+In addition to the freeform chat input, the application includes a dedicated **URL Query Bar** that lets users quickly check any website for recent changes. The user enters a URL and clicks a **Request** button; the application automatically constructs and sends a pre-formatted prompt to the LLM.
+
+**UI Component: `UrlQueryBar`**
+- Placed prominently below the header, above the chat message area
+- Contains a single-line URL input field with a link icon and placeholder text (`https://example.com`)
+- A **Request** button with a search icon sits to the right of the input
+- If the user omits the protocol, the component auto-prepends `https://`
+- Both the input and button are disabled while a request is in progress
+- Submitting clears the URL input
+
+**Automated Prompt Template**
+When the user clicks Request, the following message is automatically sent to the LLM (with `[URL]` replaced by the user's input):
+
+```
+I need you to examine [URL] and focus specifically on:
+- What's new or changed in the last 30 days?
+- Any announcements, blog posts, or news from the past month
+- Updates to products, services, or features
+- Changes to pricing, terms of service, or policies
+Please distinguish between what you can confirm as recent vs. what appears to be recent based on dates or context.
+```
+
+**Behavior**
+- The automated prompt appears in the chat thread as a regular user message so the user can see exactly what was sent
+- The LLM processes the request using its existing `web_search` and `fetch_url` tools to browse and analyze the target website
+- Tool activity cards appear inline as the LLM fetches and analyzes the site
+- The freeform chat input at the bottom of the page remains fully functional for follow-up questions or unrelated queries
+
+**Empty State**
+- When no messages exist, the main area displays a "Website Change Monitor" welcome message directing the user to enter a URL above and click Request
+- A secondary note mentions that freeform chat is also available below
